@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: backendorhelo
+    env: python
+    buildCommand: ""
+    startCommand: gunicorn backendorhelo.wsgi
+    envVars:
+      - key: DJANGO_SETTINGS_MODULE
+        value: backendorhelo.settings
+      - key: PYTHON_VERSION
+        value: 3.10
