@@ -29,6 +29,9 @@ class DemandeTransfert(models.Model):
     # 📱 Numéro Wave utilisé pour payer
     numero_wave = models.CharField(max_length=20)
 
+    statut = models.CharField(max_length=50, default='en_attente')
+
+
     # 💳 Méthode de paiement choisie (Wave ou Points)
     methode_paiement = models.CharField(max_length=10, choices=[
         ('wave', 'Wave'),

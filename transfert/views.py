@@ -145,14 +145,15 @@ class SoumissionTransfertView(APIView):
         except Utilisateur.DoesNotExist:
             return Response({"error": "Utilisateur introuvable."}, status=status.HTTP_404_NOT_FOUND)
 
-        # ✅ Création de la demande
+        # ✅ Création de la demande avec statut forcé
         demande = DemandeTransfert.objects.create(
             utilisateur=utilisateur,
             numero_destinataire=numero_destinataire,
             reseau=reseau.lower(),
             montant=montant,
             numero_wave=numero_wave,
-            methode_paiement=methode_paiement.lower()
+            methode_paiement=methode_paiement.lower(),
+            statut='en_attente'  # 🔹 On force la valeur
         )
 
         return Response({"message": "Demande enregistrée avec succès.", "id_demande": demande.id}, status=status.HTTP_201_CREATED)
