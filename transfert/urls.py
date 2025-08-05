@@ -9,5 +9,7 @@ urlpatterns = [
     path('demandes/', DemandesEnAttenteView.as_view()),  # 👈 pour l’app admin
     path('demandes_en_attente/', DemandesEnAttenteView.as_view(), name='demandes_en_attente'),
     path('valider/', ValidationDemandeView.as_view()),  # ✅ nouvelle route pour valider
+    path('enregistrer_token_admin/', EnregistrerTokenAdminView.as_view(), name='enregistrer_token_admin'),
+
 ]
 

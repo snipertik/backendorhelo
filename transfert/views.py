@@ -5,6 +5,34 @@ from django.contrib.auth.hashers import make_password, check_password
 from .models import Utilisateur, DemandeTransfert
 from rest_framework.generics import ListAPIView
 from rest_framework import serializers
+import firebase_admin
+from firebase_admin import credentials, messaging
+import os
+from django.conf import settings
+
+# 📌 Chemin pour sauvegarder le token dans un fichier
+TOKEN_FILE_PATH = os.path.join(settings.BASE_DIR, "token_admin.txt")
+
+class EnregistrerTokenAdminView(APIView):
+    def post(self, request):
+        token = request.data.get("token")
+        if not token:
+            return Response({"error": "Token manquant"}, status=400)
+        
+        # 📌 Sauvegarde le token dans un fichier
+        with open(TOKEN_FILE_PATH, "w") as f:
+            f.write(token.strip())
+        
+        return Response({"message": "Token enregistré avec succès"})
+
+
+
+# Charger la clé
+cred = credentials.Certificate("backendorhelo/firebase-key.json")
+
+# Éviter de ré-initialiser Firebase si déjà initialisé
+if not firebase_admin._apps:
+    firebase_admin.initialize_app(cred)
 
 
 # 📦 API d'inscription
@@ -114,21 +142,7 @@ class DeverrouillageView(APIView):
 # 📨 Soumission d'une demande de transfert
 class SoumissionTransfertView(APIView):
     def post(self, request):
-        """
-        Reçoit :
-        - id_utilisateur
-        - numero_destinataire
-        - reseau
-        - montant
-        - numero_wave
-        - methode_paiement
-
-        Retourne :
-        - Succès ou erreur avec ID de la demande
-        """
         data = request.data
-
-        # 🎯 Récupération des champs envoyés
         id_utilisateur = data.get('id_utilisateur')
         numero_destinataire = data.get('numero_destinataire')
         reseau = data.get('reseau')
@@ -136,7 +150,6 @@ class SoumissionTransfertView(APIView):
         numero_wave = data.get('numero_wave')
         methode_paiement = data.get('methode_paiement')
 
-        # ✅ Vérification des champs
         if not all([id_utilisateur, numero_destinataire, reseau, montant, numero_wave, methode_paiement]):
             return Response({"error": "Tous les champs sont obligatoires."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -145,7 +158,6 @@ class SoumissionTransfertView(APIView):
         except Utilisateur.DoesNotExist:
             return Response({"error": "Utilisateur introuvable."}, status=status.HTTP_404_NOT_FOUND)
 
-        # ✅ Création de la demande avec statut forcé
         demande = DemandeTransfert.objects.create(
             utilisateur=utilisateur,
             numero_destinataire=numero_destinataire,
@@ -153,10 +165,45 @@ class SoumissionTransfertView(APIView):
             montant=montant,
             numero_wave=numero_wave,
             methode_paiement=methode_paiement.lower(),
-            statut='en_attente'  # 🔹 On force la valeur
+            statut='en_attente'
+        )
+
+        # 🔔 Envoi de la notification FCM à l’admin
+        self.envoyer_notification_fcm(
+            titre="Nouvelle demande",
+            corps=f"{reseau.upper()} - {montant} F pour {numero_destinataire}"
         )
 
         return Response({"message": "Demande enregistrée avec succès.", "id_demande": demande.id}, status=status.HTTP_201_CREATED)
+
+    def envoyer_notification_fcm(self, titre, corps):
+        try:
+            # 📌 Lire le dernier token enregistré
+            from pathlib import Path
+            token_path = Path(TOKEN_FILE_PATH)
+
+            if not token_path.exists():
+                print("❌ Aucun token admin enregistré")
+                return
+
+            with open(token_path, "r") as f:
+                token_admin = f.read().strip()
+
+            message = messaging.Message(
+                notification=messaging.Notification(
+                    title=titre,
+                    body=corps
+                ),
+                token=token_admin
+            )
+
+            response = messaging.send(message)
+            print(f"✅ Notification envoyée : {response}")
+
+        except Exception as e:
+            print(f"❌ Erreur envoi FCM : {e}")
+
+
 
 
 # 🎯 Sérialiseur pour formater les données envoyées au frontend (ex : Flutter admin)
