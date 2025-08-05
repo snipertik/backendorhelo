@@ -1,54 +1,57 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import status, serializers
 from django.contrib.auth.hashers import make_password, check_password
 from .models import Utilisateur, DemandeTransfert
 from rest_framework.generics import ListAPIView
-from rest_framework import serializers
 import firebase_admin
 from firebase_admin import credentials, messaging
 import os
 from django.conf import settings
+from pathlib import Path
+import logging
 
-# 📌 Chemin pour sauvegarder le token dans un fichier
+# 📌 Logger pour enregistrer les erreurs en prod
+logger = logging.getLogger(__name__)
+
+# 📌 Fichier local pour sauvegarder le token admin (utiliser la base en prod)
 TOKEN_FILE_PATH = os.path.join(settings.BASE_DIR, "token_admin.txt")
 
+
+# 📦 API pour enregistrer le token admin FCM
 class EnregistrerTokenAdminView(APIView):
     def post(self, request):
         token = request.data.get("token")
         if not token:
-            return Response({"error": "Token manquant"}, status=400)
-        
-        # 📌 Sauvegarde le token dans un fichier
-        with open(TOKEN_FILE_PATH, "w") as f:
-            f.write(token.strip())
-        
+            return Response({"error": "Token manquant"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with open(TOKEN_FILE_PATH, "w") as f:
+                f.write(token.strip())
+        except Exception as e:
+            logger.error(f"Erreur lors de l'enregistrement du token : {e}")
+            return Response({"error": "Impossible d'enregistrer le token"}, status=500)
+
         return Response({"message": "Token enregistré avec succès"})
 
 
+# 📌 Chargement clé Firebase
+try:
+    cred_path = os.environ.get(
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        os.path.join(settings.BASE_DIR, "backendorhelo/firebase-key.json")  # chemin local dev
+    )
 
-# Charger la clé
-cred = credentials.Certificate("backendorhelo/firebase-key.json")
-
-# Éviter de ré-initialiser Firebase si déjà initialisé
-if not firebase_admin._apps:
-    firebase_admin.initialize_app(cred)
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(cred_path)
+        firebase_admin.initialize_app(cred)
+except Exception as e:
+    logger.error(f"Erreur initialisation Firebase : {e}")
 
 
 # 📦 API d'inscription
 class InscriptionView(APIView):
     def post(self, request):
-        """
-        Reçoit :
-        - nom_complet
-        - numero
-        - pin
-        - confirmation_pin
-
-        Retourne :
-        - Succès ou erreur avec message
-        """
-
         data = request.data
         nom_complet = data.get('nom_complet')
         numero = data.get('numero')
@@ -59,17 +62,20 @@ class InscriptionView(APIView):
         if not nom_complet or not numero or not pin or not confirmation_pin:
             return Response({"error": "Tous les champs sont requis."}, status=status.HTTP_400_BAD_REQUEST)
 
-        if len(pin) != 4 or not pin.isdigit():
+        if not pin.isdigit():
+            return Response({"error": "Le code PIN doit contenir uniquement des chiffres."}, status=400)
+
+        if len(pin) != 4:
             return Response({"error": "Le code PIN doit contenir exactement 4 chiffres."}, status=status.HTTP_400_BAD_REQUEST)
 
         if pin != confirmation_pin:
             return Response({"error": "Les deux codes PIN ne correspondent pas."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # ❌ Vérifier si ce numéro est déjà utilisé
+        # ❌ Vérifier si le numéro est déjà pris
         if Utilisateur.objects.filter(numero=numero).exists():
             return Response({"error": "Ce numéro est déjà inscrit."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # ✅ Créer l’utilisateur avec PIN hashé
+        # ✅ Création utilisateur
         utilisateur = Utilisateur.objects.create(
             nom_complet=nom_complet,
             numero=numero,
@@ -82,18 +88,9 @@ class InscriptionView(APIView):
 # 🔐 API de connexion
 class ConnexionView(APIView):
     def post(self, request):
-        """
-        Reçoit :
-        - numero
-        - pin
-
-        Retourne :
-        - Succès ou erreur
-        """
-
         data = request.data
         numero = data.get('numero')
-        pin = data.get('pin')
+        pin = request.data.get('pin')
 
         if not numero or not pin:
             return Response({"error": "Numéro et PIN requis."}, status=status.HTTP_400_BAD_REQUEST)
@@ -103,7 +100,6 @@ class ConnexionView(APIView):
         except Utilisateur.DoesNotExist:
             return Response({"error": "Utilisateur introuvable."}, status=status.HTTP_404_NOT_FOUND)
 
-        # Vérification du PIN
         if not check_password(pin, utilisateur.code_pin):
             return Response({"error": "Code PIN incorrect."}, status=status.HTTP_401_UNAUTHORIZED)
 
@@ -113,14 +109,6 @@ class ConnexionView(APIView):
 # 🔓 API de déverrouillage
 class DeverrouillageView(APIView):
     def post(self, request):
-        """
-        Reçoit :
-        - id_utilisateur
-        - pin
-
-        Retourne :
-        - Succès ou erreur
-        """
         data = request.data
         id_utilisateur = data.get('id_utilisateur')
         pin = data.get('pin')
@@ -150,8 +138,16 @@ class SoumissionTransfertView(APIView):
         numero_wave = data.get('numero_wave')
         methode_paiement = data.get('methode_paiement')
 
-        if not all([id_utilisateur, numero_destinataire, reseau, montant, numero_wave, methode_paiement]):
+        # ✅ Validation stricte (montant peut être 0 donc != all([...]))
+        if not id_utilisateur or not numero_destinataire or not reseau or montant is None or not numero_wave or not methode_paiement:
             return Response({"error": "Tous les champs sont obligatoires."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            montant = int(montant)
+            if montant <= 0:
+                return Response({"error": "Le montant doit être supérieur à 0."}, status=400)
+        except ValueError:
+            return Response({"error": "Montant invalide."}, status=400)
 
         try:
             utilisateur = Utilisateur.objects.get(id=id_utilisateur)
@@ -168,7 +164,7 @@ class SoumissionTransfertView(APIView):
             statut='en_attente'
         )
 
-        # 🔔 Envoi de la notification FCM à l’admin
+        # 🔔 Notification admin
         self.envoyer_notification_fcm(
             titre="Nouvelle demande",
             corps=f"{reseau.upper()} - {montant} F pour {numero_destinataire}"
@@ -178,12 +174,9 @@ class SoumissionTransfertView(APIView):
 
     def envoyer_notification_fcm(self, titre, corps):
         try:
-            # 📌 Lire le dernier token enregistré
-            from pathlib import Path
             token_path = Path(TOKEN_FILE_PATH)
-
             if not token_path.exists():
-                print("❌ Aucun token admin enregistré")
+                logger.warning("Aucun token admin enregistré")
                 return
 
             with open(token_path, "r") as f:
@@ -198,43 +191,28 @@ class SoumissionTransfertView(APIView):
             )
 
             response = messaging.send(message)
-            print(f"✅ Notification envoyée : {response}")
+            logger.info(f"Notification envoyée : {response}")
 
         except Exception as e:
-            print(f"❌ Erreur envoi FCM : {e}")
+            logger.error(f"Erreur envoi FCM : {e}")
 
 
-
-
-# 🎯 Sérialiseur pour formater les données envoyées au frontend (ex : Flutter admin)
+# 🎯 Sérialiseur
 class DemandeTransfertSerializer(serializers.ModelSerializer):
     class Meta:
         model = DemandeTransfert
         fields = '__all__'
 
 
-# 📡 Vue pour afficher toutes les demandes en attente à l'app admin (Otransous)
+# 📡 Liste demandes en attente (admin)
 class DemandesEnAttenteView(ListAPIView):
-    """
-    Cette vue est utilisée par l'application administrateur Flutter
-    Elle retourne une liste de toutes les demandes avec statut="en_attente"
-    """
     queryset = DemandeTransfert.objects.filter(statut='en_attente').order_by('-date_creation')
     serializer_class = DemandeTransfertSerializer
 
 
-
-# ✅ Vue pour valider une demande (appelée par l'app admin)
+# ✅ Validation demande (admin)
 class ValidationDemandeView(APIView):
     def post(self, request):
-        """
-        Reçoit :
-        - id_demande
-        - code_ussd (optionnel)
-
-        Retourne :
-        - Message de succès ou erreur
-        """
         data = request.data
         id_demande = data.get('id_demande')
         code_ussd = data.get('code_ussd', None)
